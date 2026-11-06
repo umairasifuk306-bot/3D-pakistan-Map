@@ -4,7 +4,7 @@ import android.content.Context
 import android.graphics.Color
 import org.json.JSONObject
 
-data class Category(val id: String, val label: String, val color: Int)
+data class Category(val id: String, val label: String, val color: Int, val isLine: Boolean = false)
 
 data class PlaceItem(
     val category: String,
@@ -18,13 +18,20 @@ data class PlaceItem(
 object Places {
     val categories = listOf(
         Category("dams", "Dams", Color.parseColor("#1565C0")),
-        Category("rivers", "Rivers", Color.parseColor("#0288D1")),
+        Category("rivers", "Rivers", Color.parseColor("#0288D1"), true),
         Category("lakes", "Lakes", Color.parseColor("#00ACC1")),
         Category("passes", "Passes", Color.parseColor("#6D4C41")),
         Category("forts", "Forts", Color.parseColor("#D84315")),
         Category("airports", "Airports", Color.parseColor("#6A1B9A")),
         Category("ports", "Ports", Color.parseColor("#283593")),
-        Category("mountains", "Mountains", Color.parseColor("#2E7D32"))
+        Category("mountains", "Mountains", Color.parseColor("#2E7D32")),
+        Category("mosques", "Mosques", Color.parseColor("#00695C")),
+        Category("tombs", "Tombs", Color.parseColor("#AD1457")),
+        Category("stadiums", "Stadiums", Color.parseColor("#F9A825")),
+        Category("parks", "Parks", Color.parseColor("#9E9D24")),
+        Category("islands", "Islands", Color.parseColor("#FF6F00")),
+        Category("glaciers", "Glaciers", Color.parseColor("#546E7A")),
+        Category("motorways", "Motorways", Color.parseColor("#37474F"), true)
     )
 
     fun category(id: String): Category =

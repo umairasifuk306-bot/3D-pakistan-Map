@@ -152,38 +152,40 @@ private fun normalStyleWithHillshade(): String? {
 
 private val LABEL_FONT = arrayOf("Noto Sans Regular")
 
-// Adds all Pakistan data (points + river lines) on top of any map style
+// Adds all Pakistan data (points + lines) on top of any map style
 private fun addPlaceLayers(style: Style, geoJson: String) {
     style.addSource(GeoJsonSource("pak-places", geoJson))
 
-    // River lines
-    style.addLayer(
-        LineLayer("pak-rivers", "pak-places")
-            .withFilter(Expression.eq(Expression.geometryType(), Expression.literal("LineString")))
-            .withProperties(
-                PropertyFactory.lineColor(Places.categories.first { it.id == "rivers" }.color),
-                PropertyFactory.lineWidth(2.5f),
-                PropertyFactory.lineCap("round"),
-                PropertyFactory.lineJoin("round")
-            )
-    )
-    style.addLayer(
-        SymbolLayer("pak-river-labels", "pak-places")
-            .withFilter(Expression.eq(Expression.geometryType(), Expression.literal("LineString")))
-            .withProperties(
-                PropertyFactory.symbolPlacement("line"),
-                PropertyFactory.textField(Expression.get("name")),
-                PropertyFactory.textFont(LABEL_FONT),
-                PropertyFactory.textSize(11f),
-                PropertyFactory.textColor(Places.categories.first { it.id == "rivers" }.color),
-                PropertyFactory.textHaloColor(android.graphics.Color.WHITE),
-                PropertyFactory.textHaloWidth(1.5f)
-            )
-    )
+    // Line categories (rivers, motorways)
+    for (cat in Places.categories.filter { it.isLine }) {
+        val catFilter = Expression.eq(Expression.get("category"), Expression.literal(cat.id))
+        style.addLayer(
+            LineLayer("pak-line-" + cat.id, "pak-places")
+                .withFilter(catFilter)
+                .withProperties(
+                    PropertyFactory.lineColor(cat.color),
+                    PropertyFactory.lineWidth(if (cat.id == "rivers") 2.5f else 3f),
+                    PropertyFactory.lineCap("round"),
+                    PropertyFactory.lineJoin("round")
+                )
+        )
+        style.addLayer(
+            SymbolLayer("pak-linelabel-" + cat.id, "pak-places")
+                .withFilter(catFilter)
+                .withProperties(
+                    PropertyFactory.symbolPlacement("line"),
+                    PropertyFactory.textField(Expression.get("name")),
+                    PropertyFactory.textFont(LABEL_FONT),
+                    PropertyFactory.textSize(11f),
+                    PropertyFactory.textColor(cat.color),
+                    PropertyFactory.textHaloColor(android.graphics.Color.WHITE),
+                    PropertyFactory.textHaloWidth(1.5f)
+                )
+        )
+    }
 
     // One colored dot layer per point category
-    for (cat in Places.categories) {
-        if (cat.id == "rivers") continue
+    for (cat in Places.categories.filter { !it.isLine }) {
         style.addLayer(
             CircleLayer("pak-dots-" + cat.id, "pak-places")
                 .withFilter(Expression.eq(Expression.get("category"), Expression.literal(cat.id)))
@@ -220,14 +222,14 @@ private fun applyFilter(style: Style, enabled: Set<String>) {
         val vis = PropertyFactory.visibility(
             if (cat.id in enabled) Property.VISIBLE else Property.NONE
         )
-        if (cat.id == "rivers") {
-            style.getLayer("pak-rivers")?.setProperties(vis)
-            style.getLayer("pak-river-labels")?.setProperties(vis)
+        if (cat.isLine) {
+            style.getLayer("pak-line-" + cat.id)?.setProperties(vis)
+            style.getLayer("pak-linelabel-" + cat.id)?.setProperties(vis)
         } else {
             style.getLayer("pak-dots-" + cat.id)?.setProperties(vis)
         }
     }
-    val pointCats = Places.categories.filter { it.id != "rivers" && it.id in enabled }
+    val pointCats = Places.categories.filter { !it.isLine && it.id in enabled }
     val filter = if (pointCats.isEmpty()) {
         Expression.literal(false)
     } else {
@@ -256,6 +258,7 @@ fun MapScreen() {
     var is3D by remember { mutableStateOf(false) }
     var satellite by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
+    var showInfo by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<PlaceItem?>(null) }
     var enabled by remember { mutableStateOf(Places.categories.map { it.id }.toSet()) }
     val enabledNow by rememberUpdatedState(enabled)
@@ -365,7 +368,7 @@ fun MapScreen() {
                             val pt = m.projection.toScreenLocation(latLng)
                             val box = RectF(pt.x - 32f, pt.y - 32f, pt.x + 32f, pt.y + 32f)
                             val layerIds = Places.categories.map {
-                                if (it.id == "rivers") "pak-rivers" else "pak-dots-" + it.id
+                                if (it.isLine) "pak-line-" + it.id else "pak-dots-" + it.id
                             }.toTypedArray()
                             val name = m.queryRenderedFeatures(box, *layerIds)
                                 .firstOrNull()?.getStringProperty("name")
@@ -463,11 +466,16 @@ fun MapScreen() {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pill("2D", !is3D) { is3D = false }
                 Pill("3D", is3D) { is3D = true }
+                Pill("Info", false) { selected = null; showInfo = true }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pill("Normal", !satellite) { satellite = false }
                 Pill("Satellite", satellite) { satellite = true }
             }
+        }
+
+        if (showInfo) {
+            InfoScreen(onClose = { showInfo = false })
         }
 
         // Detail popup
