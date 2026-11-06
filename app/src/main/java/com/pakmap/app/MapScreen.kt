@@ -1,6 +1,29 @@
 package com.pakmap.app
 
+import android.graphics.RectF
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,6 +38,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -40,6 +64,7 @@ import org.maplibre.android.maps.Style
 import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.style.layers.CircleLayer
 import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonSource
@@ -189,16 +214,51 @@ private fun addPlaceLayers(style: Style, geoJson: String) {
     )
 }
 
+// Show/hide categories on the map
+private fun applyFilter(style: Style, enabled: Set<String>) {
+    for (cat in Places.categories) {
+        val vis = PropertyFactory.visibility(
+            if (cat.id in enabled) Property.VISIBLE else Property.NONE
+        )
+        if (cat.id == "rivers") {
+            style.getLayer("pak-rivers")?.setProperties(vis)
+            style.getLayer("pak-river-labels")?.setProperties(vis)
+        } else {
+            style.getLayer("pak-dots-" + cat.id)?.setProperties(vis)
+        }
+    }
+    val pointCats = Places.categories.filter { it.id != "rivers" && it.id in enabled }
+    val filter = if (pointCats.isEmpty()) {
+        Expression.literal(false)
+    } else {
+        Expression.all(
+            Expression.eq(Expression.geometryType(), Expression.literal("Point")),
+            Expression.any(
+                *pointCats.map {
+                    Expression.eq(Expression.get("category"), Expression.literal(it.id))
+                }.toTypedArray()
+            )
+        )
+    }
+    (style.getLayer("pak-point-labels") as? SymbolLayer)?.setFilter(filter)
+}
+
 @Composable
 fun MapScreen() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val focusManager = LocalFocusManager.current
     val mapView = remember { MapView(context) }
     val geoJson = remember { Places.geoJson(context) }
+    val items = remember { Places.load(context) }
 
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var is3D by remember { mutableStateOf(false) }
     var satellite by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var selected by remember { mutableStateOf<PlaceItem?>(null) }
+    var enabled by remember { mutableStateOf(Places.categories.map { it.id }.toSet()) }
+    val enabledNow by rememberUpdatedState(enabled)
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -224,17 +284,21 @@ fun MapScreen() {
     // Style + camera change whenever 2D/3D or Normal/Satellite changes
     LaunchedEffect(map, satellite, is3D) {
         val m = map ?: return@LaunchedEffect
+        val onLoaded = { st: Style ->
+            addPlaceLayers(st, geoJson)
+            applyFilter(st, enabledNow)
+        }
 
         if (satellite) {
-            m.setStyle(Style.Builder().fromJson(satelliteStyle(is3D))) { st -> addPlaceLayers(st, geoJson) }
+            m.setStyle(Style.Builder().fromJson(satelliteStyle(is3D))) { st -> onLoaded(st) }
         } else if (!is3D) {
-            m.setStyle(Style.Builder().fromUri(STYLE_URL)) { st -> addPlaceLayers(st, geoJson) }
+            m.setStyle(Style.Builder().fromUri(STYLE_URL)) { st -> onLoaded(st) }
         } else {
             val json = withContext(Dispatchers.IO) { normalStyleWithHillshade() }
             if (json != null) {
-                m.setStyle(Style.Builder().fromJson(json)) { st -> addPlaceLayers(st, geoJson) }
+                m.setStyle(Style.Builder().fromJson(json)) { st -> onLoaded(st) }
             } else {
-                m.setStyle(Style.Builder().fromUri(STYLE_URL)) { st -> addPlaceLayers(st, geoJson) }
+                m.setStyle(Style.Builder().fromUri(STYLE_URL)) { st -> onLoaded(st) }
             }
         }
 
@@ -245,6 +309,37 @@ fun MapScreen() {
             .bearing(if (is3D) cp.bearing else 0.0)
             .build()
         m.animateCamera(CameraUpdateFactory.newCameraPosition(target), 800)
+    }
+
+    // Category filter changes
+    LaunchedEffect(map, enabled) {
+        val st = map?.style
+        if (st != null && st.isFullyLoaded) applyFilter(st, enabled)
+    }
+
+    val goTo: (PlaceItem) -> Unit = { item ->
+        selected = item
+        query = ""
+        focusManager.clearFocus()
+        if (item.category !in enabled) enabled = enabled + item.category
+        map?.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(
+                LatLng(item.lat, item.lon),
+                if (item.isLine) 7.0 else 9.0
+            ),
+            1200
+        )
+    }
+
+    val results = remember(query) {
+        if (query.isBlank()) {
+            emptyList()
+        } else {
+            items.filter {
+                it.name.contains(query, ignoreCase = true) ||
+                    Places.label(it.category).contains(query, ignoreCase = true)
+            }.take(8)
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -262,6 +357,22 @@ fun MapScreen() {
                             LatLngBounds.from(38.5, 79.0, 22.0, 59.5)
                         )
                         m.uiSettings.isTiltGesturesEnabled = false
+                        val d = context.resources.displayMetrics.density
+                        m.uiSettings.setCompassMargins(0, (150 * d).toInt(), (12 * d).toInt(), 0)
+
+                        // Tap on a dot or river -> show details
+                        m.addOnMapClickListener { latLng ->
+                            val pt = m.projection.toScreenLocation(latLng)
+                            val box = RectF(pt.x - 32f, pt.y - 32f, pt.x + 32f, pt.y + 32f)
+                            val layerIds = Places.categories.map {
+                                if (it.id == "rivers") "pak-rivers" else "pak-dots-" + it.id
+                            }.toTypedArray()
+                            val name = m.queryRenderedFeatures(box, *layerIds)
+                                .firstOrNull()?.getStringProperty("name")
+                            val hit = if (name != null) items.firstOrNull { it.name == name } else null
+                            selected = hit
+                            hit != null
+                        }
                         map = m
                     }
                 }
@@ -271,9 +382,84 @@ fun MapScreen() {
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
+                .fillMaxWidth()
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // Search bar
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("Search dam, fort, lake, K2...") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = if (query.isNotEmpty()) {
+                    {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear")
+                        }
+                    }
+                } else null,
+                shape = RoundedCornerShape(28.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color.White,
+                    unfocusedContainerColor = Color.White
+                )
+            )
+
+            // Search results
+            if (results.isNotEmpty()) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+                ) {
+                    Column {
+                        for (r in results) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { goTo(r) }
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(Places.category(r.category).color))
+                                )
+                                Spacer(Modifier.size(10.dp))
+                                Text(r.name, color = Color.Black)
+                                Spacer(Modifier.size(8.dp))
+                                Text(
+                                    Places.label(r.category),
+                                    color = Color.Gray,
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Category filter chips
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val allOn = enabled.size == Places.categories.size
+                Chip("All", PAKISTAN_GREEN, allOn) {
+                    enabled = Places.categories.map { it.id }.toSet()
+                }
+                for (cat in Places.categories) {
+                    Chip(cat.label, Color(cat.color), cat.id in enabled) {
+                        enabled = if (cat.id in enabled) enabled - cat.id else enabled + cat.id
+                    }
+                }
+            }
+
+            // Map mode buttons
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pill("2D", !is3D) { is3D = false }
                 Pill("3D", is3D) { is3D = true }
@@ -283,6 +469,56 @@ fun MapScreen() {
                 Pill("Satellite", satellite) { satellite = true }
             }
         }
+
+        // Detail popup
+        selected?.let { item ->
+            Card(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                item.name,
+                                color = Color.Black,
+                                fontWeight = FontWeight.Bold,
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                Places.label(item.category),
+                                color = Color(Places.category(item.category).color),
+                                style = androidx.compose.material3.MaterialTheme.typography.labelLarge
+                            )
+                        }
+                        IconButton(onClick = { selected = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.Gray)
+                        }
+                    }
+                    Spacer(Modifier.size(6.dp))
+                    Text(item.info, color = Color.DarkGray)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Chip(text: String, color: Color, selected: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(if (selected) color else Color.White)
+            .border(1.dp, color, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp)
+    ) {
+        Text(text, color = if (selected) Color.White else color)
     }
 }
 
